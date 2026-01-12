@@ -6,13 +6,22 @@
 // -------------------------------------------------------------------------------------
 #include <arrow/api.h>
 // -------------------------------------------------------------------------------------
+#include "ArrowReader.hpp"
 #include "Statistics.hpp"
 // -------------------------------------------------------------------------------------
 namespace virtualfile {
 // -------------------------------------------------------------------------------------
+struct ByteRange {
+    int64_t begin;
+    int64_t end;
+
+    uint64_t size() const { return end - begin + 1; }
+};
+
 class VirtualFile {
 protected:
     std::shared_ptr<arrow::Schema> schema;
+    std::shared_ptr<ArrowReader> reader;
     std::vector<std::vector<ChunkInfo>> chunkInfos;
     const uint64_t size;
     const size_t numColumns;
@@ -34,6 +43,7 @@ protected:
         result += predictMetadataOverhead();
         return result;
     }
+
 public:
     explicit VirtualFile(
             const std::shared_ptr<arrow::Schema>& schema,
@@ -49,7 +59,7 @@ public:
     virtual ~VirtualFile() = default;
 
     virtual uint64_t predictSizeOfFile(){ return size; }
-    virtual std::shared_ptr<std::string> getRange(uint64_t begin, uint64_t end) = 0;
+    virtual std::shared_ptr<std::string> getRange(ByteRange range) = 0;
 };
 // -------------------------------------------------------------------------------------
 }
