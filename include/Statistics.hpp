@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstdint>
 #include <optional>
 
@@ -10,13 +11,11 @@ struct DictionaryChunkInfo {
     uint64_t unique_values_length;
 };
 // -------------------------------------------------------------------------------------
-template <typename T>
 struct ZoneMap {
-    T min_value;
-    T max_value;
+    std::array<std::byte, 8> min_value;
+    std::array<std::byte, 8> max_value;
 };
 // -------------------------------------------------------------------------------------
-template <typename T>
 struct ChunkInfo {
     // Necessary statistics
     uint64_t uncompressed_size;
@@ -24,7 +23,7 @@ struct ChunkInfo {
 
     // Optional statistics for better performance
     std::optional<DictionaryChunkInfo> dictionary_chunk_info;
-    std::optional<ZoneMap<T>> zone_map;
+    std::optional<ZoneMap> zone_map;
 };
 // -------------------------------------------------------------------------------------
 
