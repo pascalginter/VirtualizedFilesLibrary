@@ -16,11 +16,13 @@ class VirtualParquetFile final : public VirtualFile {
     static constexpr uint64_t MAGIC_NUMBER_SIZE = 4;
     static constexpr uint64_t FOOTER_LENGTH_SIZE = 4;
 
+    std::shared_ptr<parquet::SchemaDescriptor> schemaDescriptor;
     std::unique_ptr<parquet::FileMetaData> metadata;
     std::unique_ptr<parquet::FileMetaDataBuilder> metadataBuilder;
     parquet::RowGroupMetaDataBuilder* rowgroupBuilder = nullptr;
     uint64_t fileOffset = MAGIC_NUMBER_SIZE;
     uint64_t metadataOffset;
+    uint64_t rowGroupSize;
     std::string serializedMetadata;
     std::string buffer;
     std::vector<char> currBuffer;
@@ -37,7 +39,7 @@ class VirtualParquetFile final : public VirtualFile {
             predicted.dictionary_chunk_info = info.dictionary_chunk_info;
             assert(false);
         }else{
-            predicted.uncompressed_size = info.uncompressed_size;
+            predicted.uncompressed_size = getSize(info);
         }
         return predicted;
     }
@@ -46,6 +48,7 @@ class VirtualParquetFile final : public VirtualFile {
         if (column == 0) {
             rowgroupBuilder = metadataBuilder->AppendRowGroup();
             rowgroupBuilder->set_num_rows(predictedInfo.tuple_count);
+            rowGroupSize = 0;
         }
 
         parquet::ColumnChunkMetaDataBuilder* chunkBuilder = rowgroupBuilder->NextColumnChunk();
@@ -56,12 +59,17 @@ class VirtualParquetFile final : public VirtualFile {
             predictedInfo.uncompressed_size, predictedInfo.uncompressed_size,
             false, false, {}, {});
 
+
+        fileOffset += predictedInfo.uncompressed_size;
+        if (column == numColumns - 1) {
+            rowgroupBuilder->Finish(predictedInfo.uncompressed_size);
+        }
         if (rowgroup == numRowgroups - 1 && column == numColumns - 1) {
             metadata = metadataBuilder->Finish();
         }
     }
     // TODO deduplicate logic
-    [[nodiscard]] uint64_t getDataSize(int rowgroup, int column) const {
+    [[nodiscard]] uint64_t getDataSize(const int rowgroup, const int column) const {
         const auto& info = chunkInfos[column][rowgroup];
         uint64_t result = info.uncompressed_size;
         if (metadata->schema()->Column(column)->logical_type() == parquet::LogicalType::String()) {
@@ -86,6 +94,17 @@ class VirtualParquetFile final : public VirtualFile {
         }
         if (isDictionary) return result;
         return result + 5 + ParquetUtils::GetVarintSize(arr->length() << 1);
+    }
+
+    uint64_t getSize(const ChunkInfo& info) const {
+        uint64_t result = info.uncompressed_size;
+        // TODO if ( == btrblocks::ColumnType::STRING) result -= 4;
+        return result + ParquetUtils::writePageWithoutData(info.uncompressed_size, info.tuple_count).size();
+    }
+
+    [[nodiscard]] static uint64_t getDictionarySize(uint64_t num_unique_values, uint64_t total_length) {
+        const uint64_t dataSize = total_length + num_unique_values * sizeof(int32_t);
+        return dataSize + ParquetUtils::writePageWithoutData(dataSize, num_unique_values, true).size();
     }
 
     void writeChunk(
@@ -129,20 +148,22 @@ class VirtualParquetFile final : public VirtualFile {
         }
     }
 public:
-    explicit VirtualParquetFile(const std::shared_ptr<arrow::Schema>& schema,
+    explicit VirtualParquetFile(
+        const std::shared_ptr<ArrowReader>& reader,
+        const std::shared_ptr<arrow::Schema>& schema,
         std::vector<std::vector<ChunkInfo>>&& chunkInfos) :
-            VirtualFile(schema, std::move(chunkInfos)) {
-        std::shared_ptr<parquet::SchemaDescriptor> schemaDescriptor;
+            VirtualFile(reader, schema, std::move(chunkInfos)) {
         const auto writerProps = parquet::WriterProperties::Builder().build();
         PARQUET_THROW_NOT_OK(parquet::arrow::ToParquetSchema(schema.get(), *writerProps,
             *parquet::default_arrow_writer_properties(), &schemaDescriptor));
         metadataBuilder = parquet::FileMetaDataBuilder::Make(schemaDescriptor.get(), writerProps);
-
+        size = initSize();
+        metadataOffset = size - MAGIC_NUMBER_SIZE - FOOTER_LENGTH_SIZE;
     }
 
     ~VirtualParquetFile() override = default;
 
-    std::shared_ptr<std::string> getRange(const ByteRange range) override {
+    std::string getRange(const ByteRange range) override {
         assert(range.end <= size);
         buffer.resize(range.size());
         size_t offset = 0;
@@ -154,9 +175,10 @@ public:
             offset = 4;
         }
 
-        std::shared_ptr<arrow::Array> arr;
+
         for (uint64_t i=0; i<numRowgroups; i++) {
             for (uint64_t j=0; j!=numColumns; j++) {
+                std::shared_ptr<arrow::Array> arr = reader->readChunk(i, j);
                 auto columnChunkMeta = metadata->RowGroup(i)->ColumnChunk(j);
                 int64_t chunkBegin = columnChunkMeta->has_dictionary_page() ?
                     columnChunkMeta->dictionary_page_offset() : columnChunkMeta->data_page_offset();
@@ -167,7 +189,7 @@ public:
                     arrow::ArrayVector arrays;
                     arrow::StringBuilder builder;
 
-                    arrays.push_back(reader->readChunk(i, j));
+                    arrays.push_back(arr);
                     if (arrow::is_dictionary(arr->type_id())) {
                         auto dictArray = std::static_pointer_cast<arrow::DictionaryArray>(arr)->dictionary();
                         auto status = builder.AppendArraySlice(*dictArray->data(), 0, dictArray->length());
@@ -187,8 +209,8 @@ public:
                     chunkBegin += chunkSize;
 
                 }else {
-                    int64_t chunkSize = chunkInfos[j][i].uncompressed_size;
-                    int64_t chunkEnd = chunkBegin + chunkSize - 1;
+                    const int64_t chunkSize = chunkInfos[j][i].uncompressed_size;
+                    const int64_t chunkEnd = chunkBegin + chunkSize - 1;
 
                     if (!(chunkEnd < range.begin || chunkBegin > range.end)) {
                         writeChunk(chunkBegin, chunkEnd, range, reader->readChunk(i, j), offset, false, chunkInfos[j][i].uncompressed_size);
@@ -200,8 +222,7 @@ public:
         }
 
         if (range.end >= metadataOffset && range.size() != 8) {
-            auto begin = std::max(metadataOffset, static_cast<unsigned long>(range.begin)) - metadataOffset;
-            auto end = std::min(size - 8, static_cast<unsigned long>(range.end + 1)) - metadataOffset;
+            assert(offset + serializedMetadata.size() <= buffer.size());
             memcpy(buffer.data() + offset, serializedMetadata.data(), serializedMetadata.size());
             offset += serializedMetadata.size();
         }
@@ -213,8 +234,7 @@ public:
             memcpy(buffer.data() + offset, footer.data(), footer.size());
             offset += footer.size();
         }
-        std::shared_ptr<std::string> b(&buffer, [](std::string*){});
-        return b;
+        return buffer;
     }
 };
 // -------------------------------------------------------------------------------------

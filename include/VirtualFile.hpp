@@ -20,10 +20,10 @@ struct ByteRange {
 
 class VirtualFile {
 protected:
-    std::shared_ptr<arrow::Schema> schema;
     std::shared_ptr<ArrowReader> reader;
+    std::shared_ptr<arrow::Schema> schema;
     std::vector<std::vector<ChunkInfo>> chunkInfos;
-    const uint64_t size;
+    uint64_t size = 0; // initialized in child classes
     const size_t numColumns;
     const size_t numRowgroups;
 
@@ -33,9 +33,9 @@ protected:
 
     uint64_t initSize() {
         uint64_t result = 0;
-        for (size_t i=0; i!=numColumns; i++) {
-            for (size_t j=0; j!=numRowgroups; j++) {
-                const ChunkInfo predictedChunkInfo = predictChunkInfo(chunkInfos[i][j]);
+        for (size_t i=0; i!=numRowgroups; i++) {
+            for (size_t j=0; j!=numColumns; j++) {
+                const ChunkInfo predictedChunkInfo = predictChunkInfo(chunkInfos[j][i]);
                 registerPrecomputedSize(i, j, predictedChunkInfo);
                 result += predictedChunkInfo.uncompressed_size;
             }
@@ -46,10 +46,11 @@ protected:
 
 public:
     explicit VirtualFile(
+            const std::shared_ptr<ArrowReader>& reader,
             const std::shared_ptr<arrow::Schema>& schema,
             std::vector<std::vector<ChunkInfo>>&& chunkInfos
         ) :
-            schema(schema), chunkInfos(chunkInfos), size(initSize()),
+            reader(reader), schema(schema), chunkInfos(chunkInfos),
             numColumns(chunkInfos.size()), numRowgroups(numColumns > 0 ? chunkInfos[0].size() : 0) {
         for (size_t i=0; i!=numColumns; i++) {
             assert(chunkInfos[i].size() == numRowgroups);
@@ -59,7 +60,7 @@ public:
     virtual ~VirtualFile() = default;
 
     virtual uint64_t predictSizeOfFile(){ return size; }
-    virtual std::shared_ptr<std::string> getRange(ByteRange range) = 0;
+    virtual std::string getRange(ByteRange range) = 0;
 };
 // -------------------------------------------------------------------------------------
 }

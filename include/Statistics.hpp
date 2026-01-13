@@ -22,8 +22,8 @@ struct ChunkInfo {
     uint64_t tuple_count;
 
     // Optional statistics for better performance
-    std::optional<DictionaryChunkInfo> dictionary_chunk_info;
-    std::optional<ZoneMap> zone_map;
+    std::optional<DictionaryChunkInfo> dictionary_chunk_info = std::nullopt;
+    std::optional<ZoneMap> zone_map = std::nullopt;
 };
 // -------------------------------------------------------------------------------------
 
